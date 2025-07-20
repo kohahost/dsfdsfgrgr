@@ -1,6 +1,5 @@
 // Menggunakan stellar-sdk v8.x, jadi TIDAK perlu .default
 const StellarSdk = require('stellar-sdk');
-
 const ed25519 = require('ed25519-hd-key');
 const bip39 = require('bip39');
 const axios = require('axios');
@@ -13,20 +12,14 @@ const PI_API_SERVER = 'https://api.mainnet.minepi.com';
 const PI_NETWORK_PASSPHRASE = 'Pi Network';
 const server = new StellarSdk.Server(PI_API_SERVER);
 
-/**
- * Mengirim notifikasi ke bot Telegram.
- */
 async function sendTelegramNotification(message) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
 
-    // --- INI BAGIAN YANG DIPERBAIKI DAN DISERDEHANAKAN ---
-    // Sekarang hanya memeriksa apakah token atau chat ID kosong.
     if (!token || !chatId) {
         console.warn("⚠️  Variabel Telegram (TOKEN/CHAT_ID) belum diatur di file .env. Notifikasi dilewati.");
         return;
     }
-    // --- AKHIR DARI PERBAIKAN ---
 
     const url = `https://api.telegram.org/bot${token}/sendMessage`;
     try {
@@ -63,9 +56,6 @@ async function getPiWalletAddressFromSeed(mnemonic) {
     return { publicKey: keypair.publicKey(), secretKey: keypair.secret() };
 }
 
-/**
- * Mengirim saldo berlebih di atas 1 Pi.
- */
 async function sendMaxAmount(mnemonic, recipient) {
     let wallet;
     try {
@@ -77,7 +67,7 @@ async function sendMaxAmount(mnemonic, recipient) {
         const balanceLine = account.balances.find(b => b.asset_type === 'native');
         const balance = parseFloat(balanceLine.balance);
         console.log(`💰 Saldo terdeteksi: ${balance} Pi`);
-        
+
         if (balance < 1.01) {
             console.log("⚠️ Saldo di bawah 1.01 Pi. Tidak cukup untuk cadangan minimum & biaya. Melewati...");
             return;
@@ -92,11 +82,26 @@ async function sendMaxAmount(mnemonic, recipient) {
         }
 
         const formattedAmount = amountToSend.toFixed(7);
-        console.log(`➡️ Mengirim: ${formattedAmount} Pi ke ${recipient.substring(0, 10)}...`);
 
-        const tx = new StellarSdk.TransactionBuilder(account, { fee: feeInStroops.toString(), networkPassphrase: PI_NETWORK_PASSPHRASE })
+        // ✅ DETEKSI ALAMAT TUJUAN
+        let destination;
+        let recipientDisplay;
+        if (recipient.startsWith("M")) {
+            destination = StellarSdk.MuxedAccount.fromAddress(recipient);
+            recipientDisplay = destination.baseAccount();
+        } else {
+            destination = recipient;
+            recipientDisplay = recipient;
+        }
+
+        console.log(`➡️ Mengirim: ${formattedAmount} Pi ke ${recipientDisplay.substring(0, 10)}...`);
+
+        const tx = new StellarSdk.TransactionBuilder(account, {
+            fee: feeInStroops.toString(),
+            networkPassphrase: PI_NETWORK_PASSPHRASE
+        })
             .addOperation(StellarSdk.Operation.payment({
-                destination: recipient,
+                destination,
                 asset: StellarSdk.Asset.native(),
                 amount: formattedAmount.toString(),
             }))
@@ -107,7 +112,7 @@ async function sendMaxAmount(mnemonic, recipient) {
         tx.sign(senderKeypair);
 
         const result = await server.submitTransaction(tx);
-        
+
         if (result && result.hash) {
             console.log("✅ Transaksi Berhasil! Saldo telah dikirim. Hash:", result.hash);
             const notificationMessage = `
@@ -115,7 +120,7 @@ async function sendMaxAmount(mnemonic, recipient) {
 
 <b>Jumlah:</b> <code>${formattedAmount} Pi</code>
 <b>Dari:</b> <code>${senderPublic.substring(0, 5)}...${senderPublic.substring(senderPublic.length - 5)}</code>
-<b>Ke:</b> <code>${recipient.substring(0, 5)}...${recipient.substring(recipient.length - 5)}</code>
+<b>Ke:</b> <code>${recipientDisplay.substring(0, 5)}...${recipientDisplay.substring(recipientDisplay.length - 5)}</code>
 
 <a href="https://blockexplorer.minepi.com/mainnet/transactions/${result.hash}">Lihat Transaksi</a>`;
             await sendTelegramNotification(notificationMessage.trim());
@@ -126,11 +131,11 @@ async function sendMaxAmount(mnemonic, recipient) {
     } catch (e) {
         const address = wallet ? wallet.publicKey.substring(0, 10) + '...' : 'unknown';
         if (e.message && e.message.includes("Format mnemonic tidak valid")) {
-             console.error(`❌ Error untuk Mnemonic #${walletIndex + 1}: ${e.message}`);
+            console.error(`❌ Error untuk Mnemonic #${walletIndex + 1}: ${e.message}`);
         } else if (e.response && e.response.status === 404) {
             console.error(`❌ GAGAL: Wallet ${address} tidak ditemukan/belum diaktifkan di Mainnet.`);
-        } else if (e.response && e.response.data && e.response.data.extras && e.response.data.extras.result_codes.transaction === 'tx_insufficient_balance') {
-             console.error(`❌ GAGAL: Wallet ${address} tidak memiliki saldo yang cukup untuk biaya transaksi.`);
+        } else if (e.response?.data?.extras?.result_codes?.transaction === 'tx_insufficient_balance') {
+            console.error(`❌ GAGAL: Wallet ${address} tidak memiliki saldo yang cukup untuk biaya transaksi.`);
         } else {
             console.error(`❌ Error Umum untuk Wallet ${address}:`, e.message || e);
         }
@@ -144,11 +149,12 @@ async function main() {
 
     const mnemonics = loadMnemonics();
     const recipient = process.env.RECEIVER_ADDRESS;
-    
-    if (!recipient || !recipient.startsWith('G')) {
+
+    if (!recipient || (!recipient.startsWith('G') && !recipient.startsWith('M'))) {
         console.error("❌ Error: RECEIVER_ADDRESS tidak valid atau tidak ditemukan di file .env.");
         return;
     }
+
     if (mnemonics.length === 0) {
         console.error("❌ Error: Tidak ada mnemonic yang ditemukan di mnemonics.txt.");
         return;
@@ -169,7 +175,7 @@ async function main() {
         if (walletIndex === 0) {
             console.log("\n🔄 Semua wallet telah diproses. Mengulang dari awal setelah jeda...\n");
         }
-        
+
         await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_WALLETS_MS));
     }
 }
