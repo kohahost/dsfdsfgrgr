@@ -7,7 +7,7 @@ const fs = require('fs');
 require("dotenv").config();
 const { URLSearchParams } = require('url');
 
-// --- KONFIGURasi ---
+// --- KONFIGURASI ---
 const DELAY_BETWEEN_WALLETS_MS = 1000; // Jeda antar pemrosesan wallet (dalam milidetik)
 const PI_API_SERVER = 'https://api.mainnet.minepi.com';
 const PI_NETWORK_PASSPHRASE = 'Pi Network';
@@ -74,10 +74,15 @@ async function submitTransactionDirectly(xdr) {
     try {
         const response = await axios.post(`${PI_API_SERVER}/transactions`, new URLSearchParams({ tx: xdr }), {
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            timeout: 10000 
+            timeout: 10000
         });
 
-        console.log(`✅ Transaksi berhasil dengan status: ${response.status}`);
+        // PENTING: Periksa apakah respons berisi error dari jaringan Stellar
+        if (response.data && response.data.status === 'ERROR') {
+             throw new Error(`Transaksi ditolak oleh jaringan: ${response.data.detail || JSON.stringify(response.data)}`);
+        }
+
+        console.log(`✅ Permintaan transaksi diterima oleh server.`);
         return response.data;
     } catch (error) {
         const errDetails = error.response?.data ? JSON.stringify(error.response.data) : error.message;
@@ -87,7 +92,7 @@ async function submitTransactionDirectly(xdr) {
 }
 
 /**
- * Mengirim saldo berlebih di atas 0.01 Pi dari satu wallet menggunakan operasi payment.
+ * Mengirim saldo berlebih di atas 1 Pi dari satu wallet menggunakan operasi payment.
  * Akun pengirim akan tetap aktif setelah transfer.
  */
 async function sendExcessAmount(mnemonic, recipient, walletIndex) {
@@ -103,25 +108,22 @@ async function sendExcessAmount(mnemonic, recipient, walletIndex) {
         console.log(`💰 Saldo terdeteksi: ${balance} Pi`);
 
         const feeInStroops = await server.fetchBaseFee();
-        const feeInPi = feeInStroops / 1e7; // Konversi biaya dari stroops ke Pi
+        const feeInPi = feeInStroops / 1e7;
 
-        // --- PERUBAHAN UTAMA DI SINI ---
-        // Menentukan saldo target yang ingin disisakan di wallet.
-        const TARGET_REMAINING_BALANCE = 0.01; 
-
-        // Jumlah yang bisa dikirim adalah saldo total dikurangi saldo target dan biaya transaksi.
-        const amountToSend = balance - TARGET_REMAINING_BALANCE - feeInPi;
+        // --- PERUBAHAN UTAMA DIKEMBALIKAN KE LOGIKA AWAL YANG BENAR ---
+        // Cadangan minimum Stellar adalah 1 Pi. Ini tidak bisa dikirim.
+        // Jumlah yang bisa dikirim adalah saldo total dikurangi cadangan minimum (1 Pi) dan biaya transaksi.
+        const amountToSend = balance - 1 - feeInPi;
 
         if (amountToSend <= 0) {
-            // Pesan log juga disesuaikan dengan logika baru.
-            console.log(`⚠️ Saldo (${balance} Pi) tidak cukup untuk transfer (membutuhkan > ${TARGET_REMAINING_BALANCE} Pi + ${feeInPi} Pi biaya). Melewati...`);
+            console.log(`⚠️ Saldo (${balance} Pi) tidak cukup untuk transfer (membutuhkan > 1 Pi + ${feeInPi} Pi biaya). Melewati...`);
             return;
         }
 
-        const formattedAmount = amountToSend.toFixed(7); // Format ke 7 desimal
+        const formattedAmount = amountToSend.toFixed(7);
         console.log(`➡️ Mengirim: ${formattedAmount} Pi ke ${recipient.substring(0, 10)}...`);
-        // Pesan log juga disesuaikan.
-        console.log(`   (Biaya transaksi: ${feeInPi} Pi, Sisa saldo target: ${TARGET_REMAINING_BALANCE} Pi)`);
+        // Pesan log disesuaikan untuk mencerminkan sisa saldo 1 Pi
+        console.log(`   (Biaya transaksi: ${feeInPi} Pi, Cadangan tersisa di akun: 1 Pi)`);
 
         let destinationAccount;
         try {
@@ -149,10 +151,11 @@ async function sendExcessAmount(mnemonic, recipient, walletIndex) {
 
         const result = await submitTransactionDirectly(tx.toXDR());
 
+        // Pemeriksaan yang benar adalah keberadaan 'hash' di dalam respons
         if (result && result.hash) {
             console.log("✅ Transaksi Berhasil! Hash:", result.hash);
             const notificationMessage = `
-✅ <b>Transfer Berhasil!</b> (Sisa 0.01)
+✅ <b>Transfer Berhasil!</b> (Sisa 1 Pi)
 
 <b>Jumlah:</b> <code>${formattedAmount} Pi</code>
 <b>Dari:</b> <code>${senderPublic.substring(0, 5)}...${senderPublic.substring(senderPublic.length - 5)}</code>
@@ -162,7 +165,8 @@ async function sendExcessAmount(mnemonic, recipient, walletIndex) {
 <a href="https://blockexplorer.minepi.com/mainnet/transactions/${result.hash}">Lihat Transaksi</a>`;
             await sendTelegramNotification(notificationMessage.trim());
         } else {
-            console.error("❌ GAGAL KONFIRMASI: Tidak ada hash transaksi.");
+            console.error("❌ GAGAL KONFIRMASI: Tidak ada hash transaksi dalam respons.");
+            console.error("Respons dari server:", JSON.stringify(result, null, 2));
             await sendTelegramNotification(`❌ <b>Transfer Gagal!</b> Tidak ada hash transaksi dari wallet ${senderPublic.substring(0, 5)}...`);
         }
 
@@ -174,8 +178,8 @@ async function sendExcessAmount(mnemonic, recipient, walletIndex) {
             errorMessage = `❌ Error Mnemonic #${walletIndex + 1}: ${e.message}`;
         } else if (e.message?.includes("account not found") || e.response?.status === 404) {
             errorMessage = `❌ Wallet ${address} belum aktif di Mainnet.`;
-        } else if (e.message?.includes("tx_insufficient_balance")) {
-            errorMessage = `❌ Wallet ${address} tidak cukup saldo untuk biaya transaksi atau sisa saldo target.`;
+        } else if (e.message?.includes("tx_insufficient_balance") || e.message?.includes("underfunded")) {
+            errorMessage = `❌ Wallet ${address} tidak cukup saldo untuk biaya transaksi atau cadangan minimum (1 Pi).`;
         } else if (e.message?.includes("tx_no_destination")) {
             errorMessage = `❌ Alamat tujuan (${recipient.substring(0, 10)}...) belum aktif di Mainnet.`;
         } else if (e.message?.includes("tx_bad_auth")) {
@@ -183,15 +187,18 @@ async function sendExcessAmount(mnemonic, recipient, walletIndex) {
         }
 
         console.error(errorMessage);
-        await sendTelegramNotification(`❌ <b>Transfer Gagal!</b> dari wallet ${address}\n\nDetail: ${errorMessage}`);
+        // Hindari mengirim notifikasi ganda jika error sudah ditangani di atas
+        if (!e.message?.includes("Gagal submit transaksi")) {
+             await sendTelegramNotification(`❌ <b>Transfer Gagal!</b> dari wallet ${address}\n\nDetail: ${errorMessage}`);
+        }
     }
 }
 
 
 let walletIndex = 0;
 async function main() {
-    console.log("🚀 Memulai Bot Pengirim Saldo Pi (Mode Sisa Saldo Target)...");
-    console.log("ℹ️ Bot ini akan mentransfer semua saldo dan menyisakan 0.01 Pi + biaya transaksi.");
+    console.log("🚀 Memulai Bot Pengirim Saldo Pi (Mode Transfer Saldo Berlebih)...");
+    console.log("ℹ️ Bot ini akan mentransfer semua saldo di atas 1 Pi (cadangan minimum) dan biaya transaksi.");
     console.log("🔄 Bot akan terus berjalan, memproses semua wallet secara berurutan, lalu mengulang.");
 
     const mnemonics = loadMnemonics();
