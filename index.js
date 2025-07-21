@@ -196,14 +196,14 @@ async function main() {
 
     console.log(`✔️ ${mnemonics.length} wallet dimuat.`);
     console.log(`🎯 Tujuan: ${recipient}`);
-    console.log("-------------------------------------------------------------------------------------");
+    console.log("__________________________________________________________________");
 
     while (true) {
         const mnemonic = mnemonics[walletIndex];
 
         console.log(`\n[${new Date().toLocaleString('id-ID')}] Memproses Wallet #${walletIndex + 1}/${mnemonics.length}`);
         await sendMaxAmount(mnemonic, recipient, walletIndex);
-        console.log("-------------------------------------------------------------------------------------");
+        console.log("__________________________________________________________________");
 
         walletIndex = (walletIndex + 1) % mnemonics.length;
         if (walletIndex === 0) {
