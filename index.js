@@ -146,12 +146,12 @@ async function sendMaxAmount(mnemonic, recipient, walletIndex) {
         if (result && result.hash) {
             console.log("✅ Transaksi Berhasil! Hash:", result.hash);
             const notificationMessage = `
-✅ <b>Transfer Berhasil!</b>
-
+✅ <b>Transfer Coin Pi Berhasil!</b>
+_________________
 <b>Jumlah:</b> <code>${formattedAmount} Pi</code>
 <b>Dari:</b> <code>${senderPublic.substring(0, 5)}...${senderPublic.substring(senderPublic.length - 5)}</code>
 <b>Ke:</b> <code>${recipient.substring(0, 5)}...${recipient.substring(recipient.length - 5)}</code>
-
+<b>Dev: @zendshost</b>
 <a href="https://blockexplorer.minepi.com/mainnet/transactions/${result.hash}">Lihat Transaksi</a>`;
             await sendTelegramNotification(notificationMessage.trim());
         } else {
