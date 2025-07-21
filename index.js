@@ -7,7 +7,7 @@ const fs = require('fs');
 require("dotenv").config();
 const { URLSearchParams } = require('url');
 
-// --- KONFIGURASI ---
+// --- KONFIGURasi ---
 const DELAY_BETWEEN_WALLETS_MS = 1000; // Jeda antar pemrosesan wallet (dalam milidetik)
 const PI_API_SERVER = 'https://api.mainnet.minepi.com';
 const PI_NETWORK_PASSPHRASE = 'Pi Network';
@@ -74,14 +74,12 @@ async function submitTransactionDirectly(xdr) {
     try {
         const response = await axios.post(`${PI_API_SERVER}/transactions`, new URLSearchParams({ tx: xdr }), {
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            // Meningkatkan timeout untuk memberi lebih banyak waktu respons dari server Pi
-            timeout: 10000 // Diubah dari 3000ms menjadi 10000ms (10 detik)
+            timeout: 10000 
         });
 
         console.log(`✅ Transaksi berhasil dengan status: ${response.status}`);
         return response.data;
     } catch (error) {
-        // Log respons error lengkap untuk debugging yang lebih baik
         const errDetails = error.response?.data ? JSON.stringify(error.response.data) : error.message;
         console.error(`❌ Gagal mengirim transaksi: ${errDetails}`);
         throw new Error(`Gagal submit transaksi: ${errDetails}`);
@@ -89,10 +87,10 @@ async function submitTransactionDirectly(xdr) {
 }
 
 /**
- * Mengirim semua saldo dari satu wallet ke alamat tujuan menggunakan accountMerge.
- * PENTING: Operasi ini akan MENUTUP dan MENGHAPUS akun pengirim.
+ * Mengirim saldo berlebih di atas 0.01 Pi dari satu wallet menggunakan operasi payment.
+ * Akun pengirim akan tetap aktif setelah transfer.
  */
-async function sendAllAmount(mnemonic, recipient, walletIndex) {
+async function sendExcessAmount(mnemonic, recipient, walletIndex) {
     let wallet;
     try {
         wallet = await getPiWalletAddressFromSeed(mnemonic);
@@ -104,22 +102,29 @@ async function sendAllAmount(mnemonic, recipient, walletIndex) {
         const balance = parseFloat(balanceLine.balance);
         console.log(`💰 Saldo terdeteksi: ${balance} Pi`);
 
-        // Untuk accountMerge, kita hanya perlu memastikan ada saldo yang bisa dikirim.
-        // Cadangan minimum 1 Pi dan biaya akan otomatis disertakan dalam transfer.
-        if (balance <= 0.0000001) { // Hampir nol, tidak ada yang bisa dikirim
-            console.log("⚠️ Saldo terlalu rendah untuk di-merge. Melewati...");
+        const feeInStroops = await server.fetchBaseFee();
+        const feeInPi = feeInStroops / 1e7; // Konversi biaya dari stroops ke Pi
+
+        // --- PERUBAHAN UTAMA DI SINI ---
+        // Menentukan saldo target yang ingin disisakan di wallet.
+        const TARGET_REMAINING_BALANCE = 0.01; 
+
+        // Jumlah yang bisa dikirim adalah saldo total dikurangi saldo target dan biaya transaksi.
+        const amountToSend = balance - TARGET_REMAINING_BALANCE - feeInPi;
+
+        if (amountToSend <= 0) {
+            // Pesan log juga disesuaikan dengan logika baru.
+            console.log(`⚠️ Saldo (${balance} Pi) tidak cukup untuk transfer (membutuhkan > ${TARGET_REMAINING_BALANCE} Pi + ${feeInPi} Pi biaya). Melewati...`);
             return;
         }
 
-        const feeInStroops = await server.fetchBaseFee();
-        // Untuk accountMerge, kita tidak perlu menghitung amountToSend secara eksplisit.
-        // Semua saldo akan dikirim, dan biaya akan dipotong dari saldo tersebut.
-        console.log(`➡️ Menggabungkan semua saldo (${balance} Pi) ke ${recipient.substring(0, 10)}...`);
-        console.log(`   (Biaya transaksi diperkirakan: ${feeInStroops / 1e7} Pi)`);
+        const formattedAmount = amountToSend.toFixed(7); // Format ke 7 desimal
+        console.log(`➡️ Mengirim: ${formattedAmount} Pi ke ${recipient.substring(0, 10)}...`);
+        // Pesan log juga disesuaikan.
+        console.log(`   (Biaya transaksi: ${feeInPi} Pi, Sisa saldo target: ${TARGET_REMAINING_BALANCE} Pi)`);
 
         let destinationAccount;
         try {
-            // Coba parsing sebagai Muxed Account, jika gagal, gunakan sebagai alamat publik standar
             destinationAccount = StellarSdk.MuxedAccount.fromMuxedAccount(recipient);
             console.log(`ℹ️ Tujuan: Muxed Account`);
         } catch (e) {
@@ -127,38 +132,38 @@ async function sendAllAmount(mnemonic, recipient, walletIndex) {
             console.log(`ℹ️ Tujuan: Alamat Publik standar`);
         }
 
-        // Membuat transaksi dengan operasi accountMerge
         const tx = new StellarSdk.TransactionBuilder(account, {
-            fee: feeInStroops.toString(), // Biaya transaksi
+            fee: feeInStroops.toString(),
             networkPassphrase: PI_NETWORK_PASSPHRASE
         })
-            .addOperation(StellarSdk.Operation.accountMerge({
+            .addOperation(StellarSdk.Operation.payment({
                 destination: destinationAccount,
+                asset: StellarSdk.Asset.native(),
+                amount: formattedAmount.toString(),
             }))
-            .setTimeout(30) // Timeout transaksi di blockchain (30 detik)
+            .setTimeout(30)
             .build();
 
         const senderKeypair = StellarSdk.Keypair.fromSecret(wallet.secretKey);
-        tx.sign(senderKeypair); // Menandatangani transaksi dengan kunci rahasia pengirim
+        tx.sign(senderKeypair);
 
-        // Mengirim transaksi
         const result = await submitTransactionDirectly(tx.toXDR());
 
         if (result && result.hash) {
-            console.log("✅ Transaksi Account Merge Berhasil! Hash:", result.hash);
+            console.log("✅ Transaksi Berhasil! Hash:", result.hash);
             const notificationMessage = `
-✅ <b>Account Merge Berhasil!</b>
+✅ <b>Transfer Berhasil!</b> (Sisa 0.01)
 
-<b>Jumlah Total (termasuk cadangan & fee):</b> <code>${balance} Pi</code>
-<b>Akun Sumber (Dihapus):</b> <code>${senderPublic.substring(0, 5)}...${senderPublic.substring(senderPublic.length - 5)}</code>
-<b>Akun Tujuan:</b> <code>${recipient.substring(0, 5)}...${recipient.substring(recipient.length - 5)}</code>
+<b>Jumlah:</b> <code>${formattedAmount} Pi</code>
+<b>Dari:</b> <code>${senderPublic.substring(0, 5)}...${senderPublic.substring(senderPublic.length - 5)}</code>
+<b>Ke:</b> <code>${recipient.substring(0, 5)}...${recipient.substring(recipient.length - 5)}</code>
 <b>Dev: @zendshost</b>
 
 <a href="https://blockexplorer.minepi.com/mainnet/transactions/${result.hash}">Lihat Transaksi</a>`;
             await sendTelegramNotification(notificationMessage.trim());
         } else {
             console.error("❌ GAGAL KONFIRMASI: Tidak ada hash transaksi.");
-            await sendTelegramNotification(`❌ <b>Account Merge Gagal!</b> Tidak ada hash transaksi dari wallet ${senderPublic.substring(0, 5)}...`);
+            await sendTelegramNotification(`❌ <b>Transfer Gagal!</b> Tidak ada hash transaksi dari wallet ${senderPublic.substring(0, 5)}...`);
         }
 
     } catch (e) {
@@ -170,30 +175,28 @@ async function sendAllAmount(mnemonic, recipient, walletIndex) {
         } else if (e.message?.includes("account not found") || e.response?.status === 404) {
             errorMessage = `❌ Wallet ${address} belum aktif di Mainnet.`;
         } else if (e.message?.includes("tx_insufficient_balance")) {
-            errorMessage = `❌ Wallet ${address} tidak cukup saldo untuk biaya transaksi.`;
+            errorMessage = `❌ Wallet ${address} tidak cukup saldo untuk biaya transaksi atau sisa saldo target.`;
         } else if (e.message?.includes("tx_no_destination")) {
             errorMessage = `❌ Alamat tujuan (${recipient.substring(0, 10)}...) belum aktif di Mainnet.`;
         } else if (e.message?.includes("tx_bad_auth")) {
             errorMessage = `❌ Gagal otentikasi transaksi. Pastikan kunci rahasia dan network passphrase benar.`;
-        } else if (e.message?.includes("op_has_subentries")) {
-            errorMessage = `❌ Akun ${address} memiliki trustline atau penawaran aktif. Tidak bisa di-merge.`;
         }
 
         console.error(errorMessage);
-        await sendTelegramNotification(`❌ <b>Account Merge Gagal!</b> dari wallet ${address}\n\nDetail: ${errorMessage}`);
+        await sendTelegramNotification(`❌ <b>Transfer Gagal!</b> dari wallet ${address}\n\nDetail: ${errorMessage}`);
     }
 }
 
+
 let walletIndex = 0;
 async function main() {
-    console.log("🚀 Memulai Bot Pengirim Saldo Pi (Mode Account Merge)...");
-    console.log("⚠️ PERINGATAN: Bot ini akan MENGHAPUS akun sumber setelah transfer semua saldo.");
+    console.log("🚀 Memulai Bot Pengirim Saldo Pi (Mode Sisa Saldo Target)...");
+    console.log("ℹ️ Bot ini akan mentransfer semua saldo dan menyisakan 0.01 Pi + biaya transaksi.");
+    console.log("🔄 Bot akan terus berjalan, memproses semua wallet secara berurutan, lalu mengulang.");
 
     const mnemonics = loadMnemonics();
     const recipient = process.env.RECEIVER_ADDRESS;
 
-    // Penting: Pastikan RECEIVER_ADDRESS sudah aktif di Pi Mainnet
-    // (sudah menerima setidaknya 1 Pi sebelumnya)
     if (!recipient || (!recipient.startsWith('G') && !recipient.startsWith('M'))) {
         console.error("❌ Error: RECEIVER_ADDRESS tidak valid. Harus dimulai dengan 'G' atau 'M'.");
         return;
@@ -212,13 +215,13 @@ async function main() {
         const mnemonic = mnemonics[walletIndex];
 
         console.log(`\n[${new Date().toLocaleString('id-ID')}] Memproses Wallet #${walletIndex + 1}/${mnemonics.length}`);
-        // Memanggil fungsi sendAllAmount yang menggunakan accountMerge
-        await sendAllAmount(mnemonic, recipient, walletIndex);
+        await sendExcessAmount(mnemonic, recipient, walletIndex);
         console.log("__________________________________________________________________");
 
         walletIndex = (walletIndex + 1) % mnemonics.length;
+
         if (walletIndex === 0) {
-            console.log(`\n🔄 Semua wallet telah diproses. Ulangi setelah ${DELAY_BETWEEN_WALLETS_MS / 1000} detik...\n`);
+            console.log(`\n🔄 Semua wallet telah diproses. Mengulang siklus setelah ${DELAY_BETWEEN_WALLETS_MS / 1000} detik...\n`);
         }
 
         await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_WALLETS_MS));
